@@ -1,6 +1,10 @@
 esphome:
-  name: rixens-heat
-  friendly_name: Rixens Heat
+  name: rixen-mcs7
+  friendly_name: Rixen MCS7
+  comment: Rixen System Canbus Interface
+  project:
+    name: rixen.canbus
+    version: 1.0.0
 
 esp32:
   board: esp32dev
@@ -16,28 +20,35 @@ api:
     key: "xxxxx"
 
 ota:
-  password: "xxxxx"
+  - platform: esphome
+    password: "xxxxx"
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
+#  use_address: 192.168.50.33
+
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
-    ssid: "Rixens-Heat Fallback Hotspot"
-    password: !secret  wifi_password
+    ssid: "Rixen-Mcs7 Fallback Hotspot"
+    password: "xxxxx"
 
 captive_portal:
 
+#Red LED is status led
 status_led:
   pin:
-    number: GPIO13
+    number: GPIO02
+    inverted: true
 
-
+#
+# Rixen CanBus Interface
+#
 canbus:
   - platform: esp32_can
-    tx_pin: GPIO17
-    rx_pin: GPIO16
+    tx_pin: GPIO25
+    rx_pin: GPIO26
     can_id: 0x788
     bit_rate: 250kbps
     use_extended_id: false
@@ -61,8 +72,7 @@ canbus:
                 char hex_string[6];
                 sprintf(hex_string, "%02X%02X", x[7], x[6]);
                 id(voltage).publish_state(strtol(hex_string, NULL, 16) * .1);
-              }
-      
+              } 
       # Rixens diagnostics data (a relavent subset)
       - can_id: 0x725
         then:
@@ -93,6 +103,11 @@ canbus:
         then:
           - lambda: |-
               if(x.size() > 0) {
+                //ambient temperature
+                char hex_string[6];
+                sprintf(hex_string, "%02X%02X", x[1], x[0]);
+                id(ambient_temperature).publish_state(strtol(hex_string, NULL, 16) * .1);
+
                 //engine selected
                 bool engineSelected = x[6] & 0b00100000; // Bit 53 in the payload
                 if(engineSelected){
@@ -121,6 +136,13 @@ canbus:
                 } else {
                   id(preheat_id).publish_state(false);
                 }
+                //Constant Heat (Hot Water) selected
+                bool ConstantHeatSelected = x[6] & 0b01000000; // Bit 54 in the payload
+                if(ConstantHeatSelected){
+                  id(hot_water_id).publish_state(true);
+                } else {
+                  id(hot_water_id).publish_state(false);
+                }
               }
 
 sensor:
@@ -139,32 +161,47 @@ sensor:
     unit_of_measurement: "Signal %"
     entity_category: "diagnostic"
 
+  - platform: template
+    name: Ambient Temperature
+    unit_of_measurement: °C
+    device_class: temperature
+    icon: mdi:thermometer
+    id: ambient_temperature
+
   # importing a Home Assistant temp sensor
-  - platform: homeassistant
-    id: temp_sensor
-    entity_id: sensor.inside_average_temp
-    unit_of_measurement: "°F"
-    filters:
-      - lambda: return (x-32) * 5/9; #convert to °C
-    on_value:
-      then:
-        # update rixens control with ambient temp
-        - canbus.send:
-            data: !lambda |-
-              int ambient_temp = id(temp_sensor).state * 10;
-              uint8_t can_mesg[7];
-              can_mesg[0] = 0x08;
-              can_mesg[1] = int16_t(ambient_temp) & 0xff;
-              can_mesg[2] = int16_t(ambient_temp) >> 8 & 0xff;
-              can_mesg[3] = 0x0;
-              can_mesg[4] = 0x0;
-              can_mesg[5] = 0x0;
-              can_mesg[6] = 0x0;
-              can_mesg[7] = 0x0;
-              ESP_LOGI("main", "send can id: 0x788 hex: %x %x %x %x %x %x %x %x", can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]);
-              return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
-        - delay: 10ms
+#  - platform: homeassistant
+#    id: temp_sensor
+#    entity_id: input_number.vantemperature
+#    unit_of_measurement: "°F"
+#    filters:
+#      - lambda: return (x-32) * 5/9; #convert to °C
+#    on_value:
+#      then:
+#        # update rixens control with ambient temp
+#        - canbus.send:
+#            data: !lambda |-
+#              int ambient_temp = id(temp_sensor).state * 10;
+#              uint8_t can_mesg[7];
+#              can_mesg[0] = 0x08;
+#              can_mesg[1] = int16_t(ambient_temp) & 0xff;
+#              can_mesg[2] = int16_t(ambient_temp) >> 8 & 0xff;
+#              can_mesg[3] = 0x0;
+#              can_mesg[4] = 0x0;
+#              can_mesg[5] = 0x0;
+#              can_mesg[6] = 0x0;
+#              can_mesg[7] = 0x0;
+#              ESP_LOGI("main", "send can id: 0x788 hex: %x %x %x %x %x %x %x %x", can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]);
+#              return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
+#        - delay: 10ms
   
+  # Enstead use this for temp_sensor until HA temp sensor
+  #- platform: template
+  #  name: Inside Temperature
+  #  unit_of_measurement: °F
+  #  device_class: temperature
+  #  icon: mdi:thermometer
+  #  id: temp_sensor
+
   ## Rixens's Diagnositc sensors
   # Rixens Outlet Temp
   - platform: template
@@ -209,33 +246,50 @@ sensor:
     entity_category: "diagnostic"
     accuracy_decimals: 1
 
-
 binary_sensor:
+  #Hard button input to turn on water heater (JRS)
+  - platform: gpio
+    name: Heat Water Toggle Button
+    pin:
+      number: GPIO27
+      inverted: true
+      mode:
+       input: true
+       pullup: True
+       pulldown: False
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - switch.toggle: hot_water_id
+
   # import Home Assistant sensor to override van ignition running - D+ (not necessary if you run a wire to the van's D+ ignition line)
   # this sensor controls if Rixens thinks the engine is on - it simply overrides the default D+ input (a hardwire to the ignition D+)
-  - platform: homeassistant
-    id: d_plus_sensor
-    entity_id: binary_sensor.van_running
-    on_state:
-      then:
-        # tell Rixens engine is running (d+)
-        - if:
-            condition:
-              binary_sensor.is_on: d_plus_sensor
-            then:
-              - canbus.send: [0x0B, 0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-              - delay: 10ms
-            else:
-              - canbus.send: [0x0B, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-              - delay: 10ms
-        # if the engine is switched off, but climate is in heat mode or hot water is on, turn on furnace to ensure continued heating
-        - if:
-            condition:
-              or:
-                - lambda: 'return id(this_thermostat).mode == CLIMATE_MODE_HEAT;'
-                - switch.is_on: hot_water_id
-            then:
-              - switch.turn_on: furnace_id
+# JRS - Not sure the ignition running is needed if no engine heat circuit
+#  - platform: homeassistant
+#    id: d_plus_sensor
+#    entity_id: binary_sensor.van_running
+#    on_state:
+#      then:
+#        # tell Rixens engine is running (d+)
+#        - if:
+#            condition:
+#              binary_sensor.is_on: d_plus_sensor
+#            then:
+#              - canbus.send: [0x0B, 0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
+#              - delay: 10ms
+#            else:
+#              - canbus.send: [0x0B, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
+#              - delay: 10ms
+#        # if the engine is switched off, but climate is in heat mode or hot water is on, turn on furnace to ensure continued heating
+#        - if:
+#            condition:
+#              or:
+#                - lambda: 'return id(this_thermostat).mode == CLIMATE_MODE_HEAT;'
+#                - switch.is_on: hot_water_id
+#            then:
+#              - switch.turn_on: furnace_id
+#JRS D+ end
 
 fan:
   # using a Speed Fan to manage the rixen's fan via a float output (below) - easier to control from Climate Thermostat and in Home Assistant if desired
@@ -251,7 +305,6 @@ fan:
       - delay: 30ms
       - canbus.send: [0x02, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       - delay: 10ms
-
 
 output:
   # float output targetted by the fan to send the actual values to Rixens via CAN Bus
@@ -274,6 +327,31 @@ output:
             return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
       - delay: 10ms
 
+#Blink the blue LED (for now)
+  - platform: gpio
+    pin: GPIO04
+    inverted: true
+    id: BlueLED
+
+  - platform: gpio
+    pin: GPIO15
+    inverted: true
+    id: GreenLED
+
+interval:
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            - switch.is_on: hot_water_id
+          then:
+            - output.turn_on: BlueLED
+          else:
+            - output.turn_on: GreenLED
+      - delay: 500ms
+      - output.turn_off: BlueLED
+      - output.turn_off: GreenLED
+
 climate:
   # the Thermostat for Home Assistant - NOTE: this thermostat is really only sending setpoint temperature, fan speed, and doing a bit of other logic
   # it is NOT being used for an actual hysteresis or calling for heat - that is left up to the Rixens controller
@@ -283,7 +361,7 @@ climate:
   - platform: thermostat
     name: "Heat"
     id: this_thermostat
-    sensor: temp_sensor
+    sensor: ambient_temperature
     visual:
       temperature_step: 1.0
       min_temperature: 40 °F
@@ -310,11 +388,12 @@ climate:
             - switch.turn_off: electric_id
     heat_mode:
       # If the Mode is set to Heat, but the engine is off, then the furnace is turned on (to ensure there is a heat source)
-      - if:
-          condition:
-            - binary_sensor.is_off: d_plus_sensor
-          then:
-            - switch.turn_on: furnace_id
+      - switch.turn_on: furnace_id
+##      - if:
+##          condition:
+##            - binary_sensor.is_off: d_plus_sensor
+##          then:
+##            - switch.turn_on: furnace_id
     
 
     # define presets here to use within HA
@@ -324,7 +403,7 @@ climate:
     default_preset: Standby
     preset:
       - name: Home
-        default_target_temperature_low: 68 °F
+        default_target_temperature_low: 70 °F
         fan_mode: AUTO
         mode: heat
       - name: Standby
@@ -332,7 +411,7 @@ climate:
         fan_mode: AUTO
         mode: 'OFF'
       - name: Sleep
-        default_target_temperature_low: 65 °F
+        default_target_temperature_low: 60 °F
         fan_mode: AUTO
         mode: heat
       # Freeze Protect is probably a great place to leave your thermostat (as long as you aren't parked inside)
@@ -396,7 +475,6 @@ climate:
             return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
       - delay: 10ms
 
-    
     on_state:
       # update fan mode to auto on state change if it's supposed to be on auto
       - if:
@@ -404,7 +482,6 @@ climate:
             lambda: 'return id(this_thermostat).fan_mode == CLIMATE_FAN_AUTO;'
           then:
             - canbus.send: [0x2, 0xFF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-
 
 switch:
   # Continuous Hot Water
@@ -419,9 +496,9 @@ switch:
       - if:
           # turn on furnace if engine is off
           condition:
-            and:
+#jrs            and:
               - switch.is_off: furnace_id
-              - binary_sensor.is_off: d_plus_sensor
+#jrs              - binary_sensor.is_off: d_plus_sensor
           then:
             - switch.turn_on: furnace_id
     on_turn_off:
@@ -480,9 +557,12 @@ switch:
     turn_on_action:
       - canbus.send: [0x03, 0x01, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       - delay: 10ms
+      - logger.log: "Funace turned on"
+
     turn_off_action:
       - canbus.send: [0x03, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       - delay: 10ms
+      - logger.log: "Funace turned off"
 
   # Heat source - Electric
   - platform: template
@@ -511,3 +591,4 @@ switch:
     turn_off_action:
       - canbus.send: [0x05, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       - delay: 10ms
+
