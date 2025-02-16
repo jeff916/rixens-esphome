@@ -3,6 +3,8 @@ ESPHome YAML for Rixen's **MCS7** Hydronic Heating System.
 
 This fork supports the [Copperhill ESP32-Can hardware](https://copperhilltech.com/esp32-wifi-bluetooth-classic-ble-can-bus-module/)
 
+![Copperhill CAN-Bus](./docs/assets/ESP32_CAN-Bus_board_1__70903.jpg)
+
 ## Disclaimer
 
 This configuration is offered as-is and for free. **USE AT YOUR OWN RISK**.
