@@ -160,7 +160,7 @@ sensor:
     name: "WiFi Signal Strength"
     filters:
       - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
-    unit_of_measurement: "Signal %"
+    unit_of_measurement: "%"
     entity_category: "diagnostic"
 
   - platform: template
@@ -174,7 +174,7 @@ sensor:
     name: Relative Humidity
     unit_of_measurement: "%"
     device_class: humidity
-    icon: mdi:water-percent
+    icon: mdi:humidity
     id: relative_humidity
 
   # importing a Home Assistant temp sensor
@@ -371,6 +371,8 @@ climate:
     name: "Heat"
     id: this_thermostat
     sensor: ambient_temperature
+    humidity_sensor: relative_humidity
+
     visual:
       temperature_step: 1.0
       min_temperature: 40 °F
@@ -380,7 +382,8 @@ climate:
     min_heating_off_time: 5s
     min_heating_run_time: 5s
     min_idle_time: 5s
-    
+
+
     heat_action:
       # just a place-holder as Rixen's control box makes the actual call for heat
       - logger.log: "heat action called"
