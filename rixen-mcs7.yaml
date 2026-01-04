@@ -4,7 +4,7 @@ esphome:
   comment: Rixen MCS7 System Canbus Interface
   project:
     name: rixen.canbus
-    version: 1.3.1
+    version: 1.3.4
 
 esp32:
   variant: ESP32
@@ -45,7 +45,17 @@ captive_portal:
 
 #web_server:
 #  port: 80
-  
+
+#  - platform: gpio
+#    pin: GPIO04
+#    inverted: true
+#    id: BlueLED
+
+#  - platform: gpio
+#    pin: GPIO15
+#    inverted: true
+#    id: GreenLED
+
 #Red LED is status led
 status_led:
   pin:
@@ -57,54 +67,15 @@ status_led:
 # GLOBALS
 # -------------------------------------------------------
 globals:
-  # Prevent overlapping updates
-  - id: update_lock
-    type: bool
-    initial_value: "false"
-
-  # Buffer for target temperature updates from CAN or HA
-  - id: new_target_temp
-    type: float
-    initial_value: "20.0"
-
-  - id: current_target_f
-    type: float
-    restore_value: yes
-    initial_value: "68.0"
-
   - id: block_heater_updates_until
     type: uint32_t
     restore_value: no
     initial_value: "0"
 
-# -------------------------------------------------------
-# SCRIPT: Serializes all thermostat updates
-# -------------------------------------------------------
-script:
-  - id: safe_update_target
-    mode: queued      # <<< prevents race conditions
-    then:
-      - lambda: |-
-          //if (id(update_lock)) return;
-          id(update_lock) = true;
-
-          // Race condition protection: ignore for 2s after sending setpoint
-          if (id(block_heater_updates_until) > millis()) {
-            ESP_LOGI("heater", "Ignoring heater echo: %.1f°F", id(new_target_temp));
-            return;
-          }
-
-          ESP_LOGI("heater", "Update heater target: New %f Current %f", id(new_target_temp), id(this_thermostat).target_temperature);
-          // commit new target temp
-          if(id(new_target_temp) != id(this_thermostat).target_temperature) {
-          
-            // Create climate call
-            auto call = id(this_thermostat).make_call();
-            call.set_target_temperature(id(new_target_temp));
-            call.perform();
-          }
-
-          id(update_lock) = false;
+  - id: eHeat
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
 # -------------------------------------------------------
 # Rixen CanBus Interface
@@ -192,30 +163,23 @@ canbus:
                 char hex2_string[4];
                 int leftmost_byte, rightmost_byte;
 
-                //leftmost_byte = (x[3] & 0x00FF) << 8;
-                //sprintf(hex2_string, "%02X%02X", x[3], x[2]);
-                //ESP_LOGI("HC_Status", "Setpoint_Temp:%02X%02X %f Flags: %02X", x[3], x[2], int(leftmost_byte | x[2]) *.1, x[6] );
-
                 //ambient temperature
-                //char hex_string[6];
                 leftmost_byte = (x[1] & 0x00FF) << 8;
                 id(ambient_temperature).publish_state( int(leftmost_byte | x[0]) * .1 );
+                //ESP_LOGI("Main", "Ambient Temperature Update");
 
                 //Setpoint temperature
                 float sp;
                 leftmost_byte = (x[3] & 0x00FF) << 8;
                 sp = (leftmost_byte | x[2]) * .1;
-                //id(new_target_temp) = sp;
-
-                //id(setpoint_temperature).publish_state( sp );
-                //id(target_temperature).publish_state( sp );
                 ESP_LOGI("HC_Status", "CAN Setpoint_Temp:%f", sp);
+
                 // Race condition protection: ignore for 2s after sending setpoint
                 if (id(block_heater_updates_until) > millis()) {
                   ESP_LOGI("heater", "Ignoring heater echo: %f", sp);
                 }
-                else {
-                  // commit new target temp
+                else { // commit new target temp
+
                   if(sp != id(this_thermostat).target_temperature) {
                     ESP_LOGI("heater", "Update heater target: New %f Current %f", sp, id(this_thermostat).target_temperature);
                     // Create climate call
@@ -238,25 +202,29 @@ canbus:
                 id(PumpOn_id).publish_state( (x[6] & 0b00000100) != 0 );
 
                 //furnace selected
-                bool b = ((x[6] & 0b00001000) != 0);
-                bool c = id(furnace_id).state;
+                bool mcs7_f = ((x[6] & 0b00001000) != 0); // mcs7 furnace
+                bool ha_f = id(furnace_id).state;       // HA furnace
 
-                if (b != c) {
-                  if (b) {
+                if (mcs7_f != ha_f) {
+                  if (mcs7_f) {
                     id(this_thermostat).mode = climate::CLIMATE_MODE_HEAT;
                   }
                   else {
                     id(this_thermostat).mode = climate::CLIMATE_MODE_OFF;
                   }
-                  id(furnace_id).publish_state( b );
+                  id(furnace_id).publish_state( mcs7_f );
                 }
+                // Update MCS7 status
+                id(mcs7_furnace_selected_id).publish_state( mcs7_f );
+
                 //electric selected
                 id(electric_id).publish_state( (x[6] & 0b00010000) != 0 );
+                id(mcs7_electric_selected_id).publish_state( (x[6] & 0b00010000) != 0 );
 
                 //Constant Heat (Hot Water) selected
                 id(hot_water_id).publish_state( (x[6] & 0b01000000) != 0 );
+                id(mcs7_hotwater_selected_id).publish_state( (x[6] & 0b01000000) != 0 );
               }
-#          - script.execute: safe_update_target
 
 #      - can_id: 0x727
 #       then:
@@ -270,10 +238,10 @@ canbus:
 #              ESP_LOGI("HC_WifiDebug", "TestStatus: %02X Wifi: %02X Wifi2: %02X", x[0], x[1], x[2] );
 
       # HC_Debug_IOState
-      - can_id: 0x729
-        then:
-          - lambda: |-
-              ESP_LOGI("Debug_IOState", "Data: %02X %02X %02X %02X", x[0], x[1], x[2], x[3] );
+#      - can_id: 0x729
+#        then:
+#          - lambda: |-
+#              ESP_LOGI("Debug_IOState", "Data: %02X %02X %02X %02X", x[0], x[1], x[2], x[3] );
 
       # HC_Diag3
       - can_id: 0x78A
@@ -287,42 +255,6 @@ canbus:
               id(furnace_status_code).publish_state(strtol(hex_string, NULL, 16));
 
               //id(furnace_status_code).publish_state( int16_t(x[1]) );
-
-      # VECTOR__INDEPENDENT_SIG_MSG
-#      - can_id: 0x0
-#        then:
-#          - logger.log:
-#              format: "VECTOR__INDEPENDENT_SIG_MSG"
-#              level: INFO
-#number:
-#  # Target tempurature from Home Assistant
-#  - platform: template
-#    name: "Target Temperature"
-#    id: target_temperature
-#    optimistic: true
-#    min_value: 1.6
-#    max_value: 32
-#    step: 1
-#    restore_value: true   # Remember after reboot
-#    unit_of_measurement: °C
-#    device_class: temperature
-#    icon: mdi:thermometer
-#    set_action:
-#      then:
-#        - canbus.send:
-#            data: !lambda |-
-#              int target_temp = x * 10;
-#              uint8_t can_mesg[7];
-#              can_mesg[0] = 0x01;
-#              can_mesg[1] = int16_t(target_temp) & 0xff;
-#              can_mesg[2] = int16_t(target_temp) >> 8 & 0xff;
-#              can_mesg[3] = 0x0;
-#              can_mesg[4] = 0x0;
-#              can_mesg[5] = 0x0;
-#              can_mesg[6] = 0x0;
-#              can_mesg[7] = 0x0;
-#              //ESP_LOGI("Target Set", "send can id: 0x788 hex: %x %x %x %x %x %x %x %x", can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]);
-#              return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
 
 binary_sensor:
   - platform: template
@@ -343,37 +275,51 @@ binary_sensor:
     icon: mdi:fan
     entity_category: "diagnostic"
 
+  # Rixens Furnace source
+  - platform: template
+    name: MCS7 Furnace Selected
+    id: mcs7_furnace_selected_id
+    icon: mdi:fire
+    entity_category: "diagnostic"
+
+  # Rixens Electric source 
+  - platform: template
+    name: MCS7 Electric Selected
+    id: mcs7_electric_selected_id
+    icon: mdi:flash
+    entity_category: "diagnostic"
+
+  # Rixens call for Hotwater
+  - platform: template
+    name: MCS7 Hotwater Selected
+    id: mcs7_hotwater_selected_id
+    icon: mdi:water-thermometer
+    entity_category: "diagnostic"
+
+text_sensor:
+  - platform: template
+    id: furnace_status
+    name: "Furnace Status"
+
 sensor:
-  # wifi diagnostics
-  #- platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
-  #  name: "WiFi Signal dB"
-  #  id: wifi_signal_db
-  #  update_interval: 60s
-  #  entity_category: "diagnostic"
-
-  #- platform: copy # Reports the WiFi signal strength in %
-  #  source_id: wifi_signal_db
-  #  name: "WiFi Signal Strength"
-  #  filters:
-  #    - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
-  #  unit_of_measurement: "%"
-  #  entity_category: "diagnostic"
-
   - platform: template
     name: Ambient Temperature
     unit_of_measurement: °C
     device_class: temperature
     icon: mdi:thermometer
     id: ambient_temperature
+# 30 minute filter updated every 30 seconds and sent every 2.5 minutes
+# 1 minute filter updated every 1 seconds and sent every 25 seconds
+#    update_interval: 30s
     filters:
-      - round_to_multiple_of: .5
-
-#  - platform: template
-#    name: Setpoint Temperature
-#    unit_of_measurement: °C
-#    device_class: temperature
-#    icon: mdi:thermometer
-#    id: setpoint_temperature
+      - clamp:
+          min_value: -24.0
+          max_value: 66.0
+          ignore_out_of_range: true
+      - sliding_window_moving_average:
+          window_size: 60
+          send_every: 5
+          send_first_at: 1
 
   - platform: template
     name: Relative Humidity
@@ -408,14 +354,6 @@ sensor:
 #              return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
 #        - delay: 10ms
   
-  # Enstead use this for temp_sensor until HA temp sensor
-  #- platform: template
-  #  name: Inside Temperature
-  #  unit_of_measurement: °F
-  #  device_class: temperature
-  #  icon: mdi:thermometer
-  #  id: temp_sensor
-
   ## Rixens's Diagnositc sensors
   # Rixens Outlet Temp
   - platform: template
@@ -496,40 +434,32 @@ sensor:
       - round: 1
 
   # Rixens Furnace Status Code
+  #  0 = off
+  # 10 = Initial Cold Start
+  # 20 = Running
+  # 30 = After Run to Shutdown
   - platform: template
     name: Furnace Status Code
     icon: mdi:comment-alert
     id: furnace_status_code
     state_class: measurement
     entity_category: "diagnostic"
+    on_value:
+      then:
+        - lambda: |-
+            char buffer[30];
+            int i = (int) x;
+            if (i == 0) sprintf(buffer, "Off");
+            else if (i == 10) sprintf(buffer, "Initial Cold Start");
+            else if (i == 20) sprintf(buffer, "Running");
+            else if (i == 30) sprintf(buffer, "After Run to Shutdown");
+            else {
+              sprintf(buffer, "Status: %d", i);
+            };
 
-  # import Home Assistant sensor to override van ignition running - D+ (not necessary if you run a wire to the van's D+ ignition line)
-  # this sensor controls if Rixens thinks the engine is on - it simply overrides the default D+ input (a hardwire to the ignition D+)
-# JRS - Not sure the ignition running is needed if no engine heat circuit
-#  - platform: homeassistant
-#    id: d_plus_sensor
-#    entity_id: binary_sensor.van_running
-#    on_state:
-#      then:
-#        # tell Rixens engine is running (d+)
-#        - if:
-#            condition:
-#              binary_sensor.is_on: d_plus_sensor
-#            then:
-#              - canbus.send: [0x0B, 0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-#              - delay: 10ms
-#            else:
-#              - canbus.send: [0x0B, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-#              - delay: 10ms
-#        # if the engine is switched off, but climate is in heat mode or hot water is on, turn on furnace to ensure continued heating
-#        - if:
-#            condition:
-#              or:
-#                - lambda: 'return id(this_thermostat).mode == CLIMATE_MODE_HEAT;'
-#                - switch.is_on: hot_water_id
-#            then:
-#              - switch.turn_on: furnace_id
-#JRS D+ end
+            if (id(furnace_status).state != buffer) {
+              id(furnace_status).publish_state(buffer);
+            }
 
 fan:
   # using a Speed Fan to manage the rixen's fan via a float output (below) - easier to control from Climate Thermostat and in Home Assistant if desired
@@ -585,31 +515,9 @@ output:
               return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
         - delay: 10ms
 
-#Blink the blue LED (for now)
-#  - platform: gpio
-#    pin: GPIO04
-#    inverted: true
-#    id: BlueLED
-
-#  - platform: gpio
-#    pin: GPIO15
-#    inverted: true
-#    id: GreenLED
-
-#interval:
-#  - interval: 5s
-#    then:
-#      - if:
-#          condition:
-#            - switch.is_on: hot_water_id
-#          then:
-#            - output.turn_on: BlueLED
-#          else:
-#            - output.turn_on: GreenLED
-#      - delay: 500ms
-#      - output.turn_off: BlueLED
-#      - output.turn_off: GreenLED
-
+# =====================================================================
+# Climate control
+# =====================================================================
 climate:
   # the Thermostat for Home Assistant - NOTE: this thermostat is really only sending setpoint temperature, fan speed, and doing a bit of other logic
   # it is NOT being used for an actual hysteresis or calling for heat - that is left up to the Rixens controller
@@ -635,7 +543,6 @@ climate:
     target_temperature_change_action:
       - canbus.send:
           data: !lambda |-
-            id(update_lock) = true;
             int target_temp = id(this_thermostat).target_temperature * 10;
             uint8_t can_mesg[7];
             can_mesg[0] = 0x01;
@@ -647,18 +554,18 @@ climate:
             can_mesg[6] = 0x0;
             can_mesg[7] = 0x0;
             ESP_LOGI("main", "change action can id: 0x788 hex: %x %x %x %x %x %x %x %x temp %i", can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7], target_temp);
-            id(new_target_temp) = id(this_thermostat).target_temperature;
-            id(update_lock) = false;
             // Block heater echoes for 2 seconds
             id(block_heater_updates_until) = millis() + 2000;
             return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
-
+# -----------------------------------------------------------------------------------------------------------------
+# Required actions for climate control 
     heat_action:
       # just a place-holder as Rixen's control box makes the actual call for heat
       - logger.log: "heat action called"
     idle_action:
       # just a place-holder as Rixen's control box makes the actual call for heat
       - logger.log: "going into idle"
+# -----------------------------------------------------------------------------------------------------------------
     off_mode:
       # if you turn off the thermostat, and the Hot Water switch is OFF, then turn off the furnace and elctric
       - if:
@@ -668,23 +575,23 @@ climate:
             - switch.turn_off: furnace_id
             - switch.turn_off: electric_id
     heat_mode:
-      # Turn the furnace on
-      - switch.turn_on: furnace_id
-    
+      # Turn the furnace on only if the electric source is not selected
+      - if:
+          condition:
+            - switch.is_off: electric_id
+          then:
+            - switch.turn_on: furnace_id
+
     # define presets here to use within HA
     on_boot_restore_from: memory
-    # if no memory exists, will default to "Standby" preset which turns off furnace
+    # if no memory exists, will default to "Freeze Protect" preset which turns off furnace
     # Rixens doesn't seem to have supplied a CAN Bus SetProperty for Thermostat enable / dissable, so presets and furnace management are key
-    default_preset: Standby
+    default_preset: Freeze Protect
     preset:
       - name: Home
         default_target_temperature_low: 67 °F
         fan_mode: AUTO
         mode: heat
-      - name: Standby
-        default_target_temperature_low: 35 °F
-        fan_mode: AUTO
-        mode: 'OFF'
       - name: Sleep
         default_target_temperature_low: 50 °F
         fan_mode: AUTO
@@ -730,63 +637,10 @@ climate:
       - canbus.send: [0x2, 0xFF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       - delay: 10ms
 
-    on_state:
-      then:
-#        - lambda: |-
-#            float ha_target = id(this_thermostat).target_temperature;
-#
-#            if (!std::isnan(ha_target)) {
-#              // Only update if HA actually changed it
-#              //if (fabs(id(target_setpoint) - ha_target) > 0.01) {
-#              ESP_LOGI("main", "Target temp update: %f", ha_target);
-#                //id(target_setpoint) = ha_target;
-#                //id(apply_setpoint).execute();
-#              //}
-#            }
-
-    # set target temp anytime thermostat is controlled
-#    on_control:
-#      - delay: 10ms
-#      - logger.log:
-#          format: "control action called: New %f Current %f"
-#          args: [ 'id(new_target_temp)', 'id(this_thermostat).target_temperature' ]
-#          level: INFO
-#      - if:
-#          condition:
-#            lambda: 'return id(new_target_temp) != id(this_thermostat).target_temperature;'
-#          then:
-#            # delay to ensure target temp is set
-##      - delay: 10ms
-#            - canbus.send:
-#                data: !lambda |-
-#                  id(update_lock) = true;
-#                  int target_temp = id(this_thermostat).target_temperature * 10;
-#                  uint8_t can_mesg[7];
-#                  can_mesg[0] = 0x01;
-#                  can_mesg[1] = int16_t(target_temp) & 0xff;
-#                  can_mesg[2] = int16_t(target_temp) >> 8 & 0xff;
-#                  can_mesg[3] = 0x0;
-#                  can_mesg[4] = 0x0;
-#                  can_mesg[5] = 0x0;
-#                  can_mesg[6] = 0x0;
-#                  can_mesg[7] = 0x0;
-#                  ESP_LOGI("main", "send can id: 0x788 hex: %x %x %x %x %x %x %x %x temp %i", can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7], target_temp);
-#                  id(new_target_temp) = id(this_thermostat).target_temperature;
-#                  id(update_lock) = false;
-#                  return {can_mesg[0], can_mesg[1], can_mesg[2], can_mesg[3], can_mesg[4], can_mesg[5], can_mesg[6], can_mesg[7]};
-#            - delay: 10ms
-
-#    on_state:
-#      - logger.log: "on_state thermostat action called"
-      # update fan mode to auto on state change if it's supposed to be on auto
-##      - if:
-##          condition:
-##            lambda: 'return id(this_thermostat).fan_mode == CLIMATE_FAN_AUTO;'
-##          then:
-##            - canbus.send: [0x2, 0xFF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-
 switch:
-  # Continuous Hot Water
+# =====================================================================
+# Continuous Hot Water
+# =====================================================================
   - platform: template
     name: Hot Water
     id: hot_water_id
@@ -799,11 +653,9 @@ switch:
           level: INFO
       - canbus.send: [0x06, 0x01, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       - if:
-          # turn on furnace if engine is off
+          # turn on furnace
           condition:
-#jrs            and:
               - switch.is_off: furnace_id
-#jrs              - binary_sensor.is_off: d_plus_sensor
           then:
             - switch.turn_on: furnace_id
     on_turn_off:
@@ -844,7 +696,9 @@ switch:
   #     - canbus.send:
   #         data: [0x0C, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
 
-  # Heat source - Furnace
+# =====================================================================
+# Heat source - Furnace
+# =====================================================================
   - platform: template
     name: Furnace
     id: furnace_id
@@ -865,7 +719,9 @@ switch:
       - canbus.send: [0x03, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
 #      - delay: 10ms
 
-  # Heat source - Electric
+# =====================================================================
+# Heat source - Electric
+# =====================================================================
   - platform: template
     name: Electric
     id: electric_id
