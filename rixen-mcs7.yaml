@@ -4,7 +4,7 @@ esphome:
   comment: Rixen MCS7 System Canbus Interface
   project:
     name: rixen.canbus
-    version: 1.3.4
+    version: 1.3.6
 
 esp32:
   variant: ESP32
@@ -180,8 +180,8 @@ canbus:
                 }
                 else { // commit new target temp
 
-                  if(sp != id(this_thermostat).target_temperature) {
-                    ESP_LOGI("heater", "Update heater target: New %f Current %f", sp, id(this_thermostat).target_temperature);
+                  if(sp != roundf(id(this_thermostat).target_temperature * 10.0f) / 10.0f ) {
+                    ESP_LOGI("heater", "Update heater target: New %f Current %f", sp, roundf(id(this_thermostat).target_temperature * 10.0f) / 10.0f);
                     // Create climate call
                     auto call = id(this_thermostat).make_call();
                     call.set_target_temperature(sp);
@@ -451,8 +451,12 @@ sensor:
             int i = (int) x;
             if (i == 0) sprintf(buffer, "Off");
             else if (i == 10) sprintf(buffer, "Initial Cold Start");
+            else if (i == 12) sprintf(buffer, "Warm Start");
+            else if (i == 13) sprintf(buffer, "Cold Blow");
             else if (i == 20) sprintf(buffer, "Running");
             else if (i == 30) sprintf(buffer, "After Run to Shutdown");
+            else if (i == 31) sprintf(buffer, "After Run to Standby");
+            else if (i == 40) sprintf(buffer, "Standby");
             else {
               sprintf(buffer, "Status: %d", i);
             };
@@ -532,7 +536,7 @@ climate:
 
     visual:
       temperature_step: 1.0
-      min_temperature: 35 °F
+      min_temperature: 34.9 °F
       max_temperature: 90 °F
 
     # these are meaningless (but required) in this case - Rixen's controller is handing the actual call for heat and other hysteresis 
@@ -586,7 +590,7 @@ climate:
     on_boot_restore_from: memory
     # if no memory exists, will default to "Freeze Protect" preset which turns off furnace
     # Rixens doesn't seem to have supplied a CAN Bus SetProperty for Thermostat enable / dissable, so presets and furnace management are key
-    default_preset: Freeze Protect
+    default_preset: Standby
     preset:
       - name: Home
         default_target_temperature_low: 67 °F
@@ -602,6 +606,10 @@ climate:
         default_target_temperature_low: 40 °F
         fan_mode: 'OFF'
         mode: heat
+      - name: Standby
+        default_target_temperature_low: 35 °F
+        fan_mode: 'OFF'
+        mode: 'OFF'
     
     # fan modes are available in the Climate card in HA Frontend and can be called with "climate.set_fan_mode" in automations
     min_fan_mode_switching_time: 5s # required but not particularly useful in this application
@@ -655,7 +663,7 @@ switch:
       - if:
           # turn on furnace
           condition:
-              - switch.is_off: furnace_id
+            - switch.is_off: furnace_id
           then:
             - switch.turn_on: furnace_id
     on_turn_off:
@@ -664,37 +672,37 @@ switch:
           level: INFO
       - canbus.send: [0x06, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
       # When Hot Water switch is turned off: If climate Mode is Off or Preset is Standby, then turn off furnace
-#c-remove#      - if:
-#c-remove#          condition:
-#c-remove#            or:
-#c-remove#              - lambda: |-
-#c-remove#                  return id(this_thermostat).mode == CLIMATE_MODE_OFF;
-#c-remove#              - lambda: |-
-#c-remove#                  return id(this_thermostat).custom_preset == "Standby";
-#c-remove#          then:
-#c-remove#            - switch.turn_off: furnace_id
+      - if:
+          condition:
+            or:
+              - lambda: |-
+                  return id(this_thermostat).mode == CLIMATE_MODE_OFF;
+              - lambda: |-
+                  return id(this_thermostat).get_custom_preset() == "Standby";
+          then: 
+            - switch.turn_off: furnace_id
 
 
   # Enable Thermostat property does not seem to be able to be set via CAN Bus at the moment
-  # - platform: template
-  #   name: Thermostat Enable
-  #   id: thermostat_enable_id
-  #   optimistic: True
-  #   internal: False
-  #   restore_mode: RESTORE_DEFAULT_OFF
-  #   icon: mdi:power
-  #   on_turn_on:
-  #     - logger.log:
-  #         format: "Enable Thermostat on"
-  #         level: INFO
-  #     - canbus.send:
-  #         data: [0x0C, 0x01, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
-  #   on_turn_off:
-  #     - logger.log:
-  #         format: "Enable Thermostat off"
-  #         level: INFO
-  #     - canbus.send:
-  #         data: [0x0C, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
+#  - platform: template
+#    name: Thermostat Enable
+#    id: thermostat_enable_id
+#    optimistic: True
+#    internal: False
+#    restore_mode: RESTORE_DEFAULT_OFF
+#    icon: mdi:power
+#    on_turn_on:
+#      - logger.log:
+#          format: "Enable Thermostat on"
+#          level: INFO
+#      - canbus.send:
+#          data: [0x0C, 0x01, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
+#    on_turn_off:
+#      - logger.log:
+#          format: "Enable Thermostat off"
+#          level: INFO
+#      - canbus.send:
+#          data: [0x0C, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
 
 # =====================================================================
 # Heat source - Furnace
