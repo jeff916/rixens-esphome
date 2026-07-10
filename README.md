@@ -1,7 +1,7 @@
 # Rixen's ESPHome for Home Assistant
 ESPHome YAML for Rixen's **MCS7** Hydronic Heating System.
 
-This fork supports the [WeAct CAN485 DevBoard hardware]([https://copperhilltech.com/esp32-wifi-bluetooth-classic-ble-can-bus-module](https://github.com/WeActStudio/WeActStudio.CAN485DevBoardV1_ESP32)/)
+This fork supports the [WeAct CAN485 DevBoard hardware](https://github.com/WeActStudio/WeActStudio.CAN485DevBoardV1_ESP32)
 
 ![Copperhill CAN-Bus](./docs/assets/weact_can485.png)
 
