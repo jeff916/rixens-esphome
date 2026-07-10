@@ -4,23 +4,30 @@ esphome:
   comment: Rixen MCS7 System Canbus Interface
   project:
     name: rixen.canbus
-    version: 1.3.6
-
+    version: 1.5.0
+    
 esp32:
   variant: ESP32
 #  board: esp32dev
   framework:
     type: arduino
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: True
 
 # Enable logging
 logger:
-  level: INFO
+  level: DEBUG
+#  level: INFO
+#  level: VERBOSE
+#  logs:
+#    canbus: VERBOSE
 
 # Enable Home Assistant API
 api:
   encryption:
-    key: "eErA9p/hVXg9B9UW8jgbllmZo4GROFEqecAsacIs42U="
-#  reboot_timeout: 0s # disable api reboot for bench test. Default 15min
+    key: "xx"
+  reboot_timeout: 0s # disable api reboot for bench test. Default 15min
 
 ota:
   - platform: esphome
@@ -29,11 +36,13 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  power_save_mode: NONE
+#  output_power: 20.5dB
 
   # manual IP
   manual_ip:
-    static_ip: 192.168.50.37
-    gateway: 192.168.50.1
+    static_ip: 192.168.xx.xx
+    gateway: 192.168.xx.xx
     subnet: 255.255.255.0
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
@@ -57,11 +66,82 @@ captive_portal:
 #    id: GreenLED
 
 #Red LED is status led
-status_led:
-  pin:
-    number: GPIO02
-    inverted: true
-    ignore_strapping_warning: true
+# -------------------------------------------------------
+# Onboard WS2812 RGB LED
+# -------------------------------------------------------
+light:
+  - platform: neopixelbus
+    type: GRB
+    variant: WS2812
+    pin: GPIO4
+    num_leds: 1
+    name: "Status LED"
+    id: status_led
+    restore_mode: ALWAYS_OFF
+    internal: true
+    effects:
+      - pulse:
+          name: "Pulse"
+          transition_length: 500ms
+          update_interval: 500ms
+ 
+# React to WiFi and API connection state
+interval:
+  - interval: 2s
+    then:
+      - if:
+          condition:
+            api.connected:
+          then:
+            - light.turn_on:
+                id: status_led
+                red: 0%
+                green: 100%
+                blue: 0%
+                brightness: 30%
+                effect: none
+          else:
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - light.turn_on:
+                      id: status_led
+                      red: 0%
+                      green: 0%
+                      blue: 100%
+                      brightness: 50%
+                      effect: "Pulse"
+                else:
+                  - light.turn_on:
+                      id: status_led
+                      red: 100%
+                      green: 60%
+                      blue: 0%
+                      brightness: 50%
+                      effect: "Pulse"
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          id(ambient_temperature).publish_state(id(g_ambient_temp));
+          id(relative_humidity).publish_state(id(g_relative_humidity));
+
+      - if:
+          condition:
+            switch.is_on: update_sensors_id
+          then:
+            - lambda: |-
+                id(inlet_temp).publish_state(id(g_inlet_temp));
+                id(outlet_temp).publish_state(id(g_outlet_temp));
+                id(FlameSensor).publish_state(id(g_flame_sensor));
+                id(voltage).publish_state(id(g_voltage));
+                id(heater_runtime).publish_state(id(g_heater_runtime));
+                id(heater_fan).publish_state(id(g_heater_fan));
+                id(heater_glow).publish_state(id(g_heater_glow));
+                id(heater_fuel).publish_state(id(g_heater_fuel));
+                id(furnace_status_code).publish_state(id(g_furnace_status_code));
+
 
 # -------------------------------------------------------
 # GLOBALS
@@ -77,12 +157,53 @@ globals:
     restore_value: no
     initial_value: "false"
 
+#  - id: last_inlet_temp
+#    type: float
+#    initial_value: '-999'
+#  - id: last_inlet_temp_time
+#    type: uint32_t
+#    initial_value: '0'
+
+  - id: g_inlet_temp
+    type: float
+    initial_value: '0'
+  - id: g_outlet_temp
+    type: float
+    initial_value: '0'
+  - id: g_flame_sensor
+    type: float
+    initial_value: '0'
+  - id: g_voltage
+    type: float
+    initial_value: '0'
+  - id: g_heater_runtime
+    type: long
+    initial_value: '0'
+  - id: g_heater_fan
+    type: int
+    initial_value: '0'
+  - id: g_heater_glow
+    type: float
+    initial_value: '0'
+  - id: g_heater_fuel
+    type: float
+    initial_value: '0'
+  - id: g_furnace_status_code
+    type: int
+    initial_value: '0'
+  - id: g_ambient_temp
+    type: float
+    initial_value: '0'
+  - id: g_relative_humidity
+    type: float
+    initial_value: '0'
+
 # -------------------------------------------------------
 # Rixen CanBus Interface
 # -------------------------------------------------------
 canbus:
   - platform: esp32_can
-    tx_pin: GPIO25
+    tx_pin: GPIO27
     rx_pin: GPIO26
     can_id: 0x788
     bit_rate: 250KBPS
@@ -101,24 +222,46 @@ canbus:
                 // glycol inlet temp
                 rightmost_byte = (x[0] & 0x00FF) >> 0; 
                 leftmost_byte = (x[1] & 0x00FF) << 8;
-                id(inlet_temp).publish_state( int(leftmost_byte | rightmost_byte) * .01 );
+                id(g_inlet_temp) = int(leftmost_byte | rightmost_byte) * .01;
+
+                //float new_val = int(leftmost_byte | rightmost_byte) * .01;
+                //if (abs(new_val - id(last_inlet_temp)) > 0.1 && millis() > id(last_inlet_temp_time) + 5000) {
+                //  id(last_inlet_temp) = new_val;
+                //  id(last_inlet_temp_time) = millis();
+                //  id(inlet_temp).publish_state(new_val);
+                //}
+
+                // glycol outlet temp
+                rightmost_byte = (x[2] & 0x00FF) >> 0;
+                leftmost_byte = (x[3] & 0x00FF) << 8;
+                id(g_outlet_temp) = int(leftmost_byte | rightmost_byte) * .01;
+
+                // flame sensor
+                rightmost_byte = (x[4] & 0x00FF) >> 0;
+                leftmost_byte = (x[5] & 0x00FF) << 8;
+                id(g_flame_sensor) = int(leftmost_byte | rightmost_byte) * .01;
+
+                // voltage
+                rightmost_byte = (x[6] & 0x00FF) >> 0;
+                leftmost_byte = (x[7] & 0x00FF) << 8;
+                id(g_voltage) = int(leftmost_byte | rightmost_byte) * .1;
 
                 //ESP_LOGI("inlet_temp", "hex_string: %02X%02X right_left %02X%02X Float %f %f", x[1], x[0], rightmost_byte, leftmost_byte, strtol(hex_string, NULL, 16) * .01, result );
 
                 // glycol outlet temp
-                rightmost_byte = (x[2] & 0x00FF) >> 0; 
-                leftmost_byte = (x[3] & 0x00FF) << 8;
-                id(outlet_temp).publish_state( int(leftmost_byte | rightmost_byte) * .01 );
+                //rightmost_byte = (x[2] & 0x00FF) >> 0; 
+                //leftmost_byte = (x[3] & 0x00FF) << 8;
+                //id(outlet_temp).publish_state( int(leftmost_byte | rightmost_byte) * .01 );
                 
                 // Flame Sensor temp
-                rightmost_byte = (x[4] & 0x00FF) >> 0; 
-                leftmost_byte = (x[5] & 0x00FF) << 8;
-                id(FlameSensor).publish_state( int(leftmost_byte | rightmost_byte) * .01 );
+                //rightmost_byte = (x[4] & 0x00FF) >> 0; 
+                //leftmost_byte = (x[5] & 0x00FF) << 8;
+                //id(FlameSensor).publish_state( int(leftmost_byte | rightmost_byte) * .01 );
 
                 // voltage
-                rightmost_byte = (x[6] & 0x00FF) >> 0; 
-                leftmost_byte = (x[7] & 0x00FF) << 8;
-                id(voltage).publish_state( int(leftmost_byte | rightmost_byte) * .1 );
+                //rightmost_byte = (x[6] & 0x00FF) >> 0; 
+                //leftmost_byte = (x[7] & 0x00FF) << 8;
+                //id(voltage).publish_state( int(leftmost_byte | rightmost_byte) * .1 );
               }
 
       # HC_Diag       
@@ -138,20 +281,25 @@ canbus:
                 rightmost_byte = (x[0] & 0x00FF) >> 0; 
                 middle_byte = (x[1] & 0x00FF) << 8;
                 leftmost_byte = (x[2] & 0x00FF) << 16;
-                id(heater_runtime).publish_state( long(leftmost_byte | middle_byte | rightmost_byte) );
+                //id(heater_runtime).publish_state( long(leftmost_byte | middle_byte | rightmost_byte) );
+                id(g_heater_runtime) = long(leftmost_byte | middle_byte | rightmost_byte);
+
 
                 // heater fan
                 rightmost_byte = (x[4] & 0x00FF) >> 0; 
                 leftmost_byte = (x[5] & 0x00FF) << 8;
-                id(heater_fan).publish_state( int(leftmost_byte | rightmost_byte) );
+                id(g_heater_fan) = int(leftmost_byte | rightmost_byte);
+                //id(heater_fan).publish_state( int(leftmost_byte | rightmost_byte) );
 
                 // heater glow
                 rightmost_byte = (x[6] & 0x00FF) >> 0; 
                 leftmost_byte = (x[7] & 0x00FF) << 8;
-                id(heater_glow).publish_state( int(leftmost_byte | rightmost_byte) * .1 );
+                id(g_heater_glow) = int(leftmost_byte | rightmost_byte) * .1;
+                //id(heater_glow).publish_state( int(leftmost_byte | rightmost_byte) * .1 );
                 
                 // heater fuel
-                id(heater_fuel).publish_state( int(x[3]) * .1 );
+                id(g_heater_fuel) = int(x[3]) * .1;
+                //id(heater_fuel).publish_state( int(x[3]) * .1 );
               }
 
       # bi-directional control - if settings changed on Rixen's interface, update home assistant
@@ -165,7 +313,8 @@ canbus:
 
                 //ambient temperature
                 leftmost_byte = (x[1] & 0x00FF) << 8;
-                id(ambient_temperature).publish_state( int(leftmost_byte | x[0]) * .1 );
+                id(g_ambient_temp) = int(leftmost_byte | x[0]) * .1;
+                //id(ambient_temperature).publish_state( int(leftmost_byte | x[0]) * .1 );
                 //ESP_LOGI("Main", "Ambient Temperature Update");
 
                 //Setpoint temperature
@@ -190,16 +339,26 @@ canbus:
                 }
 
                 //Relative Humidity
-                id(relative_humidity).publish_state( int(x[7]) * .1 );
+                ESP_LOGI("0x724", "%02X %02X %02X %02X %02X %02X %02X %02X", x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]);
+                id(g_relative_humidity) = (int(x[7]) / 10.0) + 25.3;
+                //ESP_LOGI("RH", "raw=%d hex=%02X converted=%.1f", x[7], x[7], id(g_relative_humidity));
+                //id(relative_humidity).publish_state( int(x[7]) * .1 );
 
+                // Binary sensors — only publish on change
                 //Fan On
-                id(FanOn_id).publish_state( (x[6] & 0b00000001) != 0 );
+                bool fan_on = (x[6] & 0b00000001) != 0;
+                if (fan_on != id(FanOn_id).state)
+                  id(FanOn_id).publish_state( fan_on );
 
                 //Heat On
-                id(HeatOn_id).publish_state( (x[6] & 0b00000010) != 0 );
+                bool heat_on = (x[6] & 0b00000010) != 0;
+                if (heat_on != id(HeatOn_id).state)
+                  id(HeatOn_id).publish_state( heat_on );
 
                 //Pump On
-                id(PumpOn_id).publish_state( (x[6] & 0b00000100) != 0 );
+                bool pump_on = (x[6] & 0b00000100) != 0;
+                if (pump_on != id(PumpOn_id).state)
+                  id(PumpOn_id).publish_state( pump_on );
 
                 //furnace selected
                 bool mcs7_f = ((x[6] & 0b00001000) != 0); // mcs7 furnace
@@ -218,12 +377,18 @@ canbus:
                 id(mcs7_furnace_selected_id).publish_state( mcs7_f );
 
                 //electric selected
-                id(electric_id).publish_state( (x[6] & 0b00010000) != 0 );
-                id(mcs7_electric_selected_id).publish_state( (x[6] & 0b00010000) != 0 );
+                bool electric_on = (x[6] & 0b00010000) != 0;
+                if (electric_on != id(electric_id).state)
+                  id(electric_id).publish_state( electric_on );
+                if (electric_on != id(mcs7_electric_selected_id).state)
+                  id(mcs7_electric_selected_id).publish_state( electric_on );
 
                 //Constant Heat (Hot Water) selected
-                id(hot_water_id).publish_state( (x[6] & 0b01000000) != 0 );
-                id(mcs7_hotwater_selected_id).publish_state( (x[6] & 0b01000000) != 0 );
+                bool hot_water_on = (x[6] & 0b01000000) != 0;
+                if (hot_water_on != id(hot_water_id).state)
+                  id(hot_water_id).publish_state( hot_water_on );
+                if (hot_water_on != id(mcs7_hotwater_selected_id).state)
+                  id(mcs7_hotwater_selected_id).publish_state( hot_water_on );
               }
 
 #      - can_id: 0x727
@@ -247,14 +412,16 @@ canbus:
       - can_id: 0x78A
         then:
           - lambda: |-
-              //ESP_LOGI("HC_Diag3", "Data: %02X %02X %02X %02X", x[0], x[1], x[2], x[3] );
+              if(x.size() > 1) {
+                //ESP_LOGI("HC_Diag3", "Data: %02X %02X %02X %02X", x[0], x[1], x[2], x[3] );
 
-              // Furnace Status Code
-              char hex_string[6];
-              sprintf(hex_string, "%02X", x[1]);
-              id(furnace_status_code).publish_state(strtol(hex_string, NULL, 16));
+                // Furnace Status Code
+                //char hex_string[6];
+                //sprintf(hex_string, "%02X", x[1]);
+                //id(furnace_status_code).publish_state(strtol(hex_string, NULL, 16));
 
-              //id(furnace_status_code).publish_state( int16_t(x[1]) );
+                id(g_furnace_status_code) = int(x[1]);
+              }
 
 binary_sensor:
   - platform: template
@@ -301,6 +468,21 @@ text_sensor:
     id: furnace_status
     name: "Furnace Status"
 
+  - platform: template
+    id: Runtime
+    name: Run Time
+    icon: mdi:fan
+    entity_category: "diagnostic"
+    lambda: |-
+      int total_minutes = (int)id(heater_runtime).state;
+      int hours = total_minutes / 60;
+      int minutes = total_minutes % 60;
+      
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%02dh:%02dm", hours, minutes);
+      return {buf};
+    update_interval: never
+
 sensor:
   - platform: template
     name: Ambient Temperature
@@ -327,6 +509,9 @@ sensor:
     device_class: humidity
     icon: mdi:water-percent
     id: relative_humidity
+    filters:
+      - delta: 0.1          # only send if value changed by 0.1°
+
 
   # importing a Home Assistant temp sensor
 #  - platform: homeassistant
@@ -363,6 +548,8 @@ sensor:
     device_class: temperature
     icon: mdi:thermometer
     id: outlet_temp
+    filters:
+      - delta: 0.1          # only send if value changed by 0.1°
 
   # Rixens Inlet Temp
   - platform: template
@@ -371,6 +558,8 @@ sensor:
     device_class: temperature
     icon: mdi:thermometer
     id: inlet_temp
+    filters:
+      - delta: 0.1          # only send if value changed by 0.1°
 
   # Rixens Flame Sensor Temp
   - platform: template
@@ -379,6 +568,8 @@ sensor:
     device_class: temperature
     icon: mdi:thermometer
     id: FlameSensor
+    filters:
+      - delta: 0.1          # only send if value changed by 0.1°
 
   # Rixens Heater Runtime
   - platform: template
@@ -387,7 +578,12 @@ sensor:
     icon: mdi:fan
     id: heater_runtime
     entity_category: "diagnostic"
-    
+    on_value:
+      then:
+        - component.update: Runtime
+    filters:
+      - delta: 1          # only send if value changed by 1
+  
   # Rixens Heater Fan RPM
   - platform: template
     name: Heater Fan RPM
@@ -396,6 +592,8 @@ sensor:
     id: heater_fan
     entity_category: "diagnostic"
     accuracy_decimals: 0
+    filters:
+      - delta: 10          # only send if value changed by 10
 
   # Rixens Heater Glow
   - platform: template
@@ -408,6 +606,7 @@ sensor:
     accuracy_decimals: 1
     filters:
       - round: 1
+      - delta: 0.1          # only send if value changed by 0.1
 
   # Rixens Heater Fuel
   - platform: template
@@ -420,6 +619,7 @@ sensor:
     accuracy_decimals: 1
     filters:
       - round: 1
+      - delta: 0.1          # only send if value changed by 0.1
 
   # Rixens Voltage
   - platform: template
@@ -432,6 +632,7 @@ sensor:
     accuracy_decimals: 1
     filters:
       - round: 1
+      - delta: 0.1          # only send if value changed by 0.1
 
   # Rixens Furnace Status Code
   #  0 = off
@@ -444,6 +645,8 @@ sensor:
     id: furnace_status_code
     state_class: measurement
     entity_category: "diagnostic"
+    filters:
+      - delta: 1            # only send if value changed by 1
     on_value:
       then:
         - lambda: |-
@@ -464,6 +667,47 @@ sensor:
             if (id(furnace_status).state != buffer) {
               id(furnace_status).publish_state(buffer);
             }
+  # WiFi signal — useful for placement decisions
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    entity_category: "diagnostic"
+    update_interval: 60s
+# Free Heap
+  - platform: template
+    name: "Free Heap"
+    id: free_heap
+    unit_of_measurement: "B"
+    state_class: measurement
+    entity_category: "diagnostic"
+    update_interval: 30s
+    lambda: |-
+      return ESP.getFreeHeap();
+    filters:
+      - delta: 1024
+
+# -------------------------------------------------------
+# Input Voltage Monitor (GPIO36 / ADC1_CH0)
+# GPIO36 is a input-only pin connected to a voltage divider on the board.
+# The filters below compensate for the divider ratio — adjust the
+# multiply value to match the actual resistor divider on your board.
+# -------------------------------------------------------
+#  - platform: adc
+#    pin: GPIO36
+#    name: "Input Voltage"
+#    id: vin_sensor
+#    unit_of_measurement: "V"
+#    device_class: voltage
+#    state_class: measurement
+#    entity_category: "diagnostic"
+#    accuracy_decimals: 2
+#    update_interval: 10s
+#    attenuation: 12db   # allows reading up to ~3.9V at the pin
+#    filters:
+#      - multiply: 12.0  # (51 + 510 + 51) / 51 from WeAct schematic
+#      - sliding_window_moving_average:
+#          window_size: 5
+#          send_every: 5
+          
 
 fan:
   # using a Speed Fan to manage the rixen's fan via a float output (below) - easier to control from Climate Thermostat and in Home Assistant if desired
@@ -578,6 +822,14 @@ climate:
           then:
             - switch.turn_off: furnace_id
             - switch.turn_off: electric_id
+      - if:
+          condition:
+            lambda: 'return id(this_thermostat).get_custom_preset() != "Standby";'
+          then:
+            - climate.control:
+                id: this_thermostat
+                custom_preset: Standby
+                
     heat_mode:
       # Turn the furnace on only if the electric source is not selected
       - if:
@@ -585,6 +837,15 @@ climate:
             - switch.is_off: electric_id
           then:
             - switch.turn_on: furnace_id
+      - if:
+          condition:
+            and:
+              - switch.is_off: hot_water_id
+              - lambda: 'return !id(this_thermostat).preset.has_value() || id(this_thermostat).preset.value() != climate::CLIMATE_PRESET_HOME;'
+          then:
+            - climate.control:
+                id: this_thermostat
+                preset: home
 
     # define presets here to use within HA
     on_boot_restore_from: memory
@@ -666,6 +927,7 @@ switch:
             - switch.is_off: furnace_id
           then:
             - switch.turn_on: furnace_id
+              
     on_turn_off:
       - logger.log:
           format: "Turn Continuous Hot Water off"
@@ -749,6 +1011,14 @@ switch:
       - canbus.send: [0x04, 0x00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]
 #      - delay: 10ms
 
+    # Update all sensors
+  - platform: template
+    name: Update Sensors
+    id: update_sensors_id
+    icon: mdi:update  
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    
 button:
   - platform: restart
     name: "Restart"
@@ -764,4 +1034,3 @@ button:
     name: "Safe Mode"
     internal: false
     entity_category: config
-
